@@ -18,6 +18,17 @@
             min-height: 100vh;
         }
         
+        /* Full-viewport background canvas for Conway's Game of Life */
+        #life-bg {
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none; /* allow clicks to pass through */
+            background: transparent;
+        }
+        
         .content-container {
             max-width: 800px;
             margin: 0 auto;
@@ -25,6 +36,8 @@
             border-radius: 12px;
             padding: 40px;
             box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            position: relative;
+            z-index: 1; /* ensure content renders above canvas */
         }
         
         h1, h2, h3 { color: #2c3e50; }
@@ -136,6 +149,7 @@
     </style>
 </head>
 <body>
+    <canvas id="life-bg" aria-hidden="true"></canvas>
     <div class="content-container">
 
         
@@ -216,6 +230,147 @@
     </div>
     
     <script>
+        // Conway's Game of Life background (lightweight)
+        (function() {
+            const canvas = document.getElementById('life-bg');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d', { alpha: true });
+
+            let cols = 0, rows = 0;
+            let cellSize = 10; // px per cell (logical)
+            let gridA = null, gridB = null;
+            let usingA = true;
+            let width = 0, height = 0, dpr = Math.max(1, window.devicePixelRatio || 1);
+            let lastStepMs = 0;
+            const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+            let stepIntervalMs = prefersReducedMotion.matches ? 400 : 60; // slower if user prefers reduced motion
+
+            function indexFromXY(x, y) { return y * cols + x; }
+
+            function seedRandom() {
+                const grid = usingA ? gridA : gridB;
+                for (let i = 0; i < grid.length; i++) {
+                    // 1-in-5 chance alive
+                    grid[i] = Math.random() < 0.2 ? 1 : 0;
+                }
+            }
+
+            function resize() {
+                dpr = Math.max(1, window.devicePixelRatio || 1);
+                width = Math.floor(window.innerWidth);
+                height = Math.floor(window.innerHeight);
+
+                canvas.width = Math.max(1, Math.floor(width * dpr));
+                canvas.height = Math.max(1, Math.floor(height * dpr));
+                canvas.style.width = width + 'px';
+                canvas.style.height = height + 'px';
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+                // Choose cell size based on viewport for perf/looks
+                // Larger screens -> larger cells
+                const targetCellsAcross = Math.min(160, Math.max(80, Math.floor(width / 12)));
+                cellSize = Math.max(8, Math.min(14, Math.floor(width / targetCellsAcross)));
+
+                cols = Math.max(10, Math.ceil(width / cellSize));
+                rows = Math.max(10, Math.ceil(height / cellSize));
+
+                gridA = new Uint8Array(cols * rows);
+                gridB = new Uint8Array(cols * rows);
+                usingA = true;
+                seedRandom();
+            }
+
+            function stepLife() {
+                const src = usingA ? gridA : gridB;
+                const dst = usingA ? gridB : gridA;
+
+                for (let y = 0; y < rows; y++) {
+                    const yUp = (y - 1 + rows) % rows;
+                    const yDn = (y + 1) % rows;
+                    for (let x = 0; x < cols; x++) {
+                        const xLt = (x - 1 + cols) % cols;
+                        const xRt = (x + 1) % cols;
+
+                        const idx = indexFromXY(x, y);
+                        let n = 0;
+                        n += src[indexFromXY(xLt, yUp)];
+                        n += src[indexFromXY(x,    yUp)];
+                        n += src[indexFromXY(xRt, yUp)];
+                        n += src[indexFromXY(xLt, y   )];
+                        n += src[indexFromXY(xRt, y   )];
+                        n += src[indexFromXY(xLt, yDn)];
+                        n += src[indexFromXY(x,    yDn)];
+                        n += src[indexFromXY(xRt, yDn)];
+
+                        const alive = src[idx] === 1;
+                        dst[idx] = (n === 3 || (alive && n === 2)) ? 1 : 0;
+                    }
+                }
+
+                usingA = !usingA;
+            }
+
+            function draw() {
+                ctx.clearRect(0, 0, width, height);
+                const grid = usingA ? gridA : gridB;
+
+                // Subtle alive cell color over dark bg
+                ctx.fillStyle = 'rgba(255,255,255,0.08)';
+                for (let y = 0; y < rows; y++) {
+                    for (let x = 0; x < cols; x++) {
+                        if (grid[indexFromXY(x, y)]) {
+                            ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+                        }
+                    }
+                }
+
+                // Optional soft grid to add texture
+                ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+                ctx.lineWidth = 1;
+                for (let x = 0; x <= cols; x++) {
+                    const px = x * cellSize + 0.5;
+                    ctx.beginPath();
+                    ctx.moveTo(px, 0);
+                    ctx.lineTo(px, rows * cellSize);
+                    ctx.stroke();
+                }
+                for (let y = 0; y <= rows; y++) {
+                    const py = y * cellSize + 0.5;
+                    ctx.beginPath();
+                    ctx.moveTo(0, py);
+                    ctx.lineTo(cols * cellSize, py);
+                    ctx.stroke();
+                }
+            }
+
+            function animate(ts) {
+                if (!lastStepMs) lastStepMs = ts;
+                const elapsed = ts - lastStepMs;
+                if (elapsed >= stepIntervalMs) {
+                    stepLife();
+                    lastStepMs = ts;
+                }
+                draw();
+                requestAnimationFrame(animate);
+            }
+
+            // Reseed occasionally to avoid stagnation
+            setInterval(() => {
+                seedRandom();
+            }, 45000);
+
+            // React to user changing reduced-motion preference
+            if (prefersReducedMotion && typeof prefersReducedMotion.addEventListener === 'function') {
+                prefersReducedMotion.addEventListener('change', (e) => {
+                    stepIntervalMs = e.matches ? 400 : 60;
+                });
+            }
+
+            window.addEventListener('resize', resize);
+            resize();
+            requestAnimationFrame(animate);
+        })();
+
         // Image overlay functionality
         document.addEventListener('DOMContentLoaded', function() {
             const overlay = document.getElementById('imageOverlay');
