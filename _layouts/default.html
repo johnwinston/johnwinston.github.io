@@ -206,6 +206,10 @@
             let usingA = true;
             let width = 0, height = 0, dpr = Math.max(1, window.devicePixelRatio || 1);
             let lastStepMs = 0;
+            let lastSeedMs = 0;
+            let needsDraw = true;
+            let gridLayer = null; // offscreen canvas holding the static grid lines
+            const reseedIntervalMs = 45000;
             const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
             let stepIntervalMs = prefersReducedMotion.matches ? 400 : 60; // slower if user prefers reduced motion
 
@@ -217,12 +221,43 @@
                     // 1-in-5 chance alive
                     grid[i] = Math.random() < 0.2 ? 1 : 0;
                 }
+                needsDraw = true;
+            }
+
+            // The grid lines never change between resizes, so render them once
+            function buildGridLayer() {
+                gridLayer = document.createElement('canvas');
+                gridLayer.width = canvas.width;
+                gridLayer.height = canvas.height;
+                const g = gridLayer.getContext('2d');
+                g.setTransform(dpr, 0, 0, dpr, 0, 0);
+                g.strokeStyle = 'rgba(255,255,255,0.04)';
+                g.lineWidth = 1;
+                // Stroke each line separately so crossings blend exactly as before
+                for (let x = 0; x <= cols; x++) {
+                    const px = x * cellSize + 0.5;
+                    g.beginPath();
+                    g.moveTo(px, 0);
+                    g.lineTo(px, rows * cellSize);
+                    g.stroke();
+                }
+                for (let y = 0; y <= rows; y++) {
+                    const py = y * cellSize + 0.5;
+                    g.beginPath();
+                    g.moveTo(0, py);
+                    g.lineTo(cols * cellSize, py);
+                    g.stroke();
+                }
             }
 
             function resize() {
-                dpr = Math.max(1, window.devicePixelRatio || 1);
-                width = Math.floor(window.innerWidth);
-                height = Math.floor(window.innerHeight);
+                const newDpr = Math.max(1, window.devicePixelRatio || 1);
+                const newWidth = Math.floor(window.innerWidth);
+                const newHeight = Math.floor(window.innerHeight);
+                if (gridA && newDpr === dpr && newWidth === width && newHeight === height) return;
+                dpr = newDpr;
+                width = newWidth;
+                height = newHeight;
 
                 canvas.width = Math.max(1, Math.floor(width * dpr));
                 canvas.height = Math.max(1, Math.floor(height * dpr));
@@ -241,6 +276,7 @@
                 gridA = new Uint8Array(cols * rows);
                 gridB = new Uint8Array(cols * rows);
                 usingA = true;
+                buildGridLayer();
                 seedRandom();
             }
 
@@ -272,56 +308,45 @@
                 }
 
                 usingA = !usingA;
+                needsDraw = true;
             }
 
             function draw() {
                 ctx.clearRect(0, 0, width, height);
                 const grid = usingA ? gridA : gridB;
 
-                // Subtle alive cell color over dark bg
+                // Subtle alive cell color over dark bg, batched into one fill
                 ctx.fillStyle = 'rgba(255,255,255,0.08)';
-                for (let y = 0; y < rows; y++) {
-                    for (let x = 0; x < cols; x++) {
-                        if (grid[indexFromXY(x, y)]) {
-                            ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
-                        }
+                ctx.beginPath();
+                for (let y = 0, i = 0; y < rows; y++) {
+                    for (let x = 0; x < cols; x++, i++) {
+                        if (grid[i]) ctx.rect(x * cellSize, y * cellSize, cellSize, cellSize);
                     }
                 }
+                ctx.fill();
 
-                // Optional soft grid to add texture
-                ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-                ctx.lineWidth = 1;
-                for (let x = 0; x <= cols; x++) {
-                    const px = x * cellSize + 0.5;
-                    ctx.beginPath();
-                    ctx.moveTo(px, 0);
-                    ctx.lineTo(px, rows * cellSize);
-                    ctx.stroke();
-                }
-                for (let y = 0; y <= rows; y++) {
-                    const py = y * cellSize + 0.5;
-                    ctx.beginPath();
-                    ctx.moveTo(0, py);
-                    ctx.lineTo(cols * cellSize, py);
-                    ctx.stroke();
-                }
+                // Soft grid texture, pre-rendered (drawn in device pixels)
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
+                ctx.drawImage(gridLayer, 0, 0);
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                needsDraw = false;
             }
 
             function animate(ts) {
-                if (!lastStepMs) lastStepMs = ts;
-                const elapsed = ts - lastStepMs;
-                if (elapsed >= stepIntervalMs) {
+                if (!lastStepMs) lastStepMs = lastSeedMs = ts;
+                if (ts - lastSeedMs >= reseedIntervalMs) {
+                    // Reseed occasionally to avoid stagnation
+                    seedRandom();
+                    lastSeedMs = ts;
+                }
+                if (ts - lastStepMs >= stepIntervalMs) {
                     stepLife();
                     lastStepMs = ts;
                 }
-                draw();
+                // Only repaint when the board actually changed, not every display frame
+                if (needsDraw) draw();
                 requestAnimationFrame(animate);
             }
-
-            // Reseed occasionally to avoid stagnation
-            setInterval(() => {
-                seedRandom();
-            }, 45000);
 
             // React to user changing reduced-motion preference
             if (prefersReducedMotion && typeof prefersReducedMotion.addEventListener === 'function') {
@@ -330,7 +355,13 @@
                 });
             }
 
-            window.addEventListener('resize', resize);
+            // Debounce so dragging the window or mobile URL-bar changes don't
+            // reallocate and reseed the board on every resize event
+            let resizeTimer = 0;
+            window.addEventListener('resize', () => {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(resize, 150);
+            });
             resize();
             requestAnimationFrame(animate);
         })();
